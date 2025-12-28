@@ -13,7 +13,7 @@ var_ram="${var_ram:-512}"                  # RAM in MB
 var_disk="${var_disk:-4}"                  # Disk in GB
 var_os="${var_os:-debian}"                 # debian/ubuntu/alpine
 var_version="${var_version:-13}"           # Debian 13
-var_unprivileged="${var_unprivileged:-1}"  # onprivileged LXC
+var_unprivileged="${var_unprivileged:-1}"  # unprivileged LXC
 
 # ================== INTERACTIEVE VRAGEN ==================
 
@@ -23,31 +23,120 @@ echo "   ${APP} - interactieve configuratie"
 echo "=============================================="
 echo
 
-# 1) Proxmox LXC root-wachtwoord vragen (var_pw)
+# 1) Proxmox LXC root-wachtwoord genereren + eventueel overschrijven
+echo "Er wordt automatisch een sterk root-wachtwoord voor de LXC gegenereerd."
+# 20 tekens, letters/cijfers/symbolen
+GEN_ROOT_PW="$(tr -dc 'A-Za-z0-9!@#$%_-+=' </dev/urandom | head -c 20 || true)"
+
+# fallback als om wat voor reden dan ook GEN_ROOT_PW leeg is
+if [[ -z "$GEN_ROOT_PW" ]]; then
+  GEN_ROOT_PW="Pve$(date +%s%N | sha256sum | head -c 12)!"
+fi
+
+echo
+echo "Voorgesteld root-wachtwoord voor de LXC:"
+echo "  $GEN_ROOT_PW"
+echo
+
 while true; do
-  read -srp "Kies een root-wachtwoord voor de LXC: " PW1
+  read -srp "Druk Enter om dit wachtwoord te gebruiken, of voer een eigen wachtwoord in: " PW1
   echo
-  read -srp "Herhaal het root-wachtwoord: " PW2
-  echo
-  if [[ "$PW1" != "$PW2" ]]; then
-    echo "Wachtwoorden komen niet overeen, probeer opnieuw."
-  elif [[ -z "$PW1" ]]; then
-    echo "Wachtwoord mag niet leeg zijn, probeer opnieuw."
-  else
+  if [[ -z "$PW1" ]]; then
+    # gebruiker accepteert de gegenereerde variant
+    var_pw="$GEN_ROOT_PW"
+    echo "Gegenereerd wachtwoord wordt gebruikt."
     break
+  else
+    # gebruiker wil eigen wachtwoord -> even dubbel laten invoeren
+    read -srp "Herhaal het eigen wachtwoord: " PW2
+    echo
+    if [[ "$PW1" != "$PW2" ]]; then
+      echo "Wachtwoorden komen niet overeen, probeer opnieuw."
+    else
+      var_pw="$PW1"
+      echo "Eigen wachtwoord wordt gebruikt."
+      break
+    fi
   fi
 done
-export var_pw="$PW1"
 
-# 2) GitHub URL vragen (private repo -> liefst URL met token of SSH)
+export var_pw
+
+# 2) GitHub via PAT / HTTPS URL
 echo
-echo "Voorbeeld:"
-echo "  - HTTPS met token: https://<TOKEN>@github.com/user/repo.git"
-echo "  - SSH-URL:         git@github.com:user/repo.git (vereist SSH key in de container)"
+echo "Repository toegang via GitHub Personal Access Token (PAT) over HTTPS."
 echo
-while [[ -z "${GIT_REPO:-}" ]]; do
-  read -rp "Voer de volledige Git clone-URL in voor de (private) repository: " GIT_REPO
+echo "Je kunt hier één van de twee opties gebruiken:"
+echo
+echo "  Voorbeeld 1 - ALLEEN PAT-string:"
+echo "    github_pat_..."
+echo
+echo "  Voorbeeld 2 - Volledige HTTPS-URL met PAT:"
+echo "    https://github_pat_...@github.com/user/repo.git"
+echo
+
+GIT_REPO=""
+while [[ -z "$GIT_REPO" ]]; do
+  read -rp "Voer je GitHub PAT of volledige HTTPS-URL in: " GIT_INPUT
+
+  # Alleen een PAT-string opgegeven?
+  if [[ "$GIT_INPUT" == github_pat_* ]]; then
+    GITHUB_PAT="$GIT_INPUT"
+
+    # Repo-naam vragen in vorm user/repo
+    REPO_SLUG=""
+    while [[ -z "$REPO_SLUG" ]]; do
+      read -rp "Voer de repository-naam in als 'user/repo' (bijv. mijnuser/mijnrepo): " REPO_SLUG
+      if [[ "$REPO_SLUG" != */* ]]; then
+        echo "Formaat ongeldig. Gebruik 'user/repo'."
+        REPO_SLUG=""
+      fi
+    done
+
+    GIT_REPO="https://$GITHUB_PAT@github.com/$REPO_SLUG.git"
+    echo
+    echo "Gegenereerde HTTPS-URL op basis van PAT:"
+    echo "  $GIT_REPO"
+    echo
+
+    # Proberen te valideren als git op de host aanwezig is
+    if command -v git >/dev/null 2>&1; then
+      echo "Controleer toegang tot de repository met dit token..."
+      if git ls-remote --heads "$GIT_REPO" >/dev/null 2>&1; then
+        echo "✅ Token en repository lijken geldig."
+      else
+        echo "❌ FOUT: kan de repository niet benaderen met dit token/URL."
+        echo "   - Klopt de repo-naam (user/repo)?"
+        echo "   - Heeft de PAT voldoende rechten (Contents: read)?"
+        exit 1
+      fi
+    else
+      echo "Let op: 'git' is niet beschikbaar op de host, URL kan niet vooraf online gevalideerd worden."
+    fi
+
+  else
+    # Niet met github_pat_ begonnen → we gaan ervan uit dat het al een volledige URL is
+    # Voorbeeld:
+    #   https://github_pat_...@github.com/user/repo.git
+    GIT_REPO="$GIT_INPUT"
+    echo
+    echo "Ingevoerde Git clone-URL:"
+    echo "  $GIT_REPO"
+    echo
+
+    if command -v git >/dev/null 2>&1; then
+      echo "Controleer toegang tot de repository met deze URL..."
+      if git ls-remote --heads "$GIT_REPO" >/dev/null 2>&1; then
+        echo "✅ URL en toegang lijken geldig."
+      else
+        echo "❌ FOUT: kan de repository niet benaderen met deze URL."
+        echo "   - Controleer PAT, rechten en repositorynaam."
+        exit 1
+      fi
+    fi
+  fi
 done
+
 export GIT_REPO
 
 # App specifieke defaults (kun je desnoods nog aanpassen)
@@ -58,7 +147,7 @@ UV_BIN="${UV_BIN:-/root/.local/bin/uv}"       # uv-binary pad
 
 echo
 echo "Samenvatting invoer:"
-echo "  - Root wachtwoord : *** (verborgen)"
+echo "  - Root wachtwoord : $var_pw"
 echo "  - GitHub URL      : $GIT_REPO"
 echo "  - App directory   : $APP_DIR"
 echo "  - Script          : $PYTHON_SCRIPT"
@@ -104,10 +193,13 @@ post_install_python_uv() {
       curl -LsSf https://astral.sh/uv/install.sh | sh
     fi
 
+    # Repo-URL (zoals opgegeven op de host)
+    REPO_URL='$GIT_REPO'
+
     # App directory + repo
     mkdir -p '$APP_DIR'
     if [ ! -d '$APP_DIR/.git' ]; then
-      git clone '$GIT_REPO' '$APP_DIR'
+      git clone \"\$REPO_URL\" '$APP_DIR'
     else
       cd '$APP_DIR'
       git pull
@@ -115,8 +207,19 @@ post_install_python_uv() {
 
     cd '$APP_DIR'
 
-    # Dependencies syncen via uv (pyproject.toml / uv.lock / requirements)
-    '$UV_BIN' sync
+    # Dependencies controleren en evt. syncen via uv
+    if [ -f \"pyproject.toml\" ] || [ -f \"requirements.txt\" ] || [ -f \"requirements.in\" ]; then
+      echo \"[INFO] Dependency-bestanden gevonden in $APP_DIR:\"
+      [ -f \"pyproject.toml\" ]   && echo \"  - pyproject.toml\"
+      [ -f \"requirements.txt\" ] && echo \"  - requirements.txt\"
+      [ -f \"requirements.in\" ]  && echo \"  - requirements.in\"
+
+      echo \"[INFO] Voer 'uv sync' uit...\"
+      '$UV_BIN' sync
+    else
+      echo \"[WARN] Geen pyproject.toml, requirements.txt of requirements.in gevonden in $APP_DIR\"
+      echo \"[WARN] 'uv sync' wordt overgeslagen.\"
+    fi
 
     # Log-directory
     mkdir -p /var/log/python-job
@@ -157,6 +260,8 @@ $CRON_SCHEDULE cd $APP_DIR && $UV_BIN sync && $UV_BIN run $PYTHON_SCRIPT >> /var
 
 IP address: $IP
 
+Root password: $var_pw
+
 Repo: $GIT_REPO
 Script: $PYTHON_SCRIPT
 Cron: $CRON_SCHEDULE"
@@ -178,3 +283,5 @@ echo -e "${INFO}${YW} De container gebruikt DHCP voor zijn IP-adres.${CL}"
 echo -e "${INFO}${YW} Het IP-adres wordt getoond in:${CL}"
 echo -e "${TAB}${NETWORK}${GN}- Proxmox 'Summary / Algemene informatie' (Description)${CL}"
 echo -e "${TAB}${NETWORK}${GN}- /etc/motd binnen de container${CL}"
+echo
+echo -e "${INFO}${YW} Root-wachtwoord van de container:${CL} ${GN}$var_pw${CL}"
