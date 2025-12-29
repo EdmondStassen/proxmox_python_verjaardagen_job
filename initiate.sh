@@ -163,7 +163,7 @@ while [[ -z "$GIT_AUTH_METHOD" ]]; do
           if git ls-remote --heads "$GIT_REPO" >/dev/null 2>&1; then
             echo "✅ URL en toegang lijken geldig."
           else
-            echo "❌ FOUT: kan de repository niet benaderen met deze URL."
+            echo "❌ FOUT op host: kan de repository niet benaderen met deze URL."
             echo "   - Controleer PAT, rechten en repositorynaam."
             GIT_REPO=""
           fi
@@ -264,14 +264,25 @@ post_install_python_uv() {
   pct exec "$CTID" -- bash -c "
     set -e
 
+    echo '[DEBUG] Start post_install in container...'
+    echo '[DEBUG] GIT_AUTH_METHOD in container: $GIT_AUTH_METHOD'
+    echo '[DEBUG] APP_DIR in container: $APP_DIR'
+
     # Basis packages
     apt-get update
     apt-get -y upgrade
     apt-get install -y git curl openssh-client python3 python3-venv cron
 
+    # Basis netwerk-check
+    echo '[DEBUG] DNS lookup github.com:'
+    getent hosts github.com || echo '[WARN] github.com kan niet worden geresolved'
+
     # uv installeren (indien nog niet aanwezig)
     if [ ! -x '$UV_BIN' ]; then
+      echo '[INFO] uv niet gevonden, installeren...'
       curl -LsSf https://astral.sh/uv/install.sh | sh
+    else
+      echo '[INFO] uv is al aanwezig.'
     fi
 
     # Git auth configureren
@@ -280,7 +291,7 @@ post_install_python_uv() {
     DEPLOY_KEY_B64='$DEPLOY_KEY_B64'
 
     if [ \"\$GIT_AUTH_METHOD\" = \"ssh_deploy_key\" ]; then
-      echo \"[INFO] SSH deploy key configureren voor GitHub (poort 443 via ssh.github.com)...\"
+      echo '[INFO] SSH deploy key configureren voor GitHub (poort 443 via ssh.github.com)...'
       mkdir -p /root/.ssh
       chmod 700 /root/.ssh
 
@@ -299,39 +310,78 @@ EOF
       chmod 600 /root/.ssh/config
 
       touch /root/.ssh/known_hosts
-      if ! grep -q \"github.com\" /root/.ssh/known_hosts 2>/dev/null; then
-        # host key binnenhalen op poort 443, maar entry hernoemen naar 'github.com'
+      if ! grep -q 'github.com' /root/.ssh/known_hosts 2>/dev/null; then
+        echo '[DEBUG] Haal host key op voor github.com via ssh.github.com:443...'
         ssh-keyscan -p 443 ssh.github.com 2>/dev/null | sed 's/ssh.github.com/github.com/' >> /root/.ssh/known_hosts || true
       fi
 
-      echo \"[INFO] SSH config voor github.com ingesteld (via ssh.github.com:443).\"
+      echo '[INFO] SSH config voor github.com ingesteld (via ssh.github.com:443).'
+
+      echo '[DEBUG] Test SSH verbinding naar GitHub...'
+      # korte test, met timeout, zodat hij niet blijft hangen
+      set +e
+      timeout 15 ssh -vvT git@github.com -p 443 </dev/null
+      SSH_TEST_EXIT=\$?
+      set -e
+      if [ \"\$SSH_TEST_EXIT\" -ne 0 ]; then
+        echo \"[WARN] SSH test naar GitHub (poort 443) faalde met exit code \$SSH_TEST_EXIT\"
+      else
+        echo '[INFO] SSH test naar GitHub succesvol (poort 443).'
+      fi
+    else
+      echo '[INFO] HTTPS/PAT methode geselecteerd. Test HTTPS naar github.com...'
+      set +e
+      timeout 15 curl -I https://github.com 2>&1 | sed 's/^/[CURL] /'
+      CURL_EXIT=\$?
+      set -e
+      if [ \"\$CURL_EXIT\" -ne 0 ]; then
+        echo \"[WARN] HTTPS test naar github.com faalde met exit code \$CURL_EXIT\"
+      else
+        echo '[INFO] HTTPS naar github.com lijkt te werken.'
+      fi
     fi
 
     # App directory + repo
     mkdir -p '$APP_DIR'
     if [ ! -d '$APP_DIR/.git' ]; then
-      echo \"[INFO] Clone van repo: \$REPO_URL\"
-      git clone \"\$REPO_URL\" '$APP_DIR'
+      echo \"[INFO] Clone van repo (timeout 120s): \$REPO_URL\"
+      set +e
+      timeout 120 git clone \"\$REPO_URL\" '$APP_DIR' 2>&1
+      CLONE_EXIT=\$?
+      set -e
+      if [ \"\$CLONE_EXIT\" -ne 0 ]; then
+        echo \"[ERROR] git clone is mislukt met exit code \$CLONE_EXIT\"
+        exit \"\$CLONE_EXIT\"
+      fi
+      echo '[INFO] git clone succesvol afgerond.'
     else
-      echo \"[INFO] Bestaande repo gevonden, voer git pull uit...\"
+      echo '[INFO] Bestaande repo gevonden, voer git pull uit (timeout 120s)...'
       cd '$APP_DIR'
-      git pull
+      set +e
+      timeout 120 git pull 2>&1
+      PULL_EXIT=\$?
+      set -e
+      if [ \"\$PULL_EXIT\" -ne 0 ]; then
+        echo \"[WARN] git pull mislukt met exit code \$PULL_EXIT (ga verder zonder abort).\"
+      else
+        echo '[INFO] git pull succesvol afgerond.'
+      fi
     fi
 
     cd '$APP_DIR'
 
     # Dependencies controleren en evt. syncen via uv
-    if [ -f \"pyproject.toml\" ] || [ -f \"requirements.txt\" ] || [ -f \"requirements.in\" ]; then
-      echo \"[INFO] Dependency-bestanden gevonden in $APP_DIR:\"
-      [ -f \"pyproject.toml\" ]   && echo \"  - pyproject.toml\"
-      [ -f \"requirements.txt\" ] && echo \"  - requirements.txt\"
-      [ -f \"requirements.in\" ]  && echo \"  - requirements.in\"
+    if [ -f 'pyproject.toml' ] || [ -f 'requirements.txt' ] || [ -f 'requirements.in' ]; then
+      echo '[INFO] Dependency-bestanden gevonden in $APP_DIR:'
+      [ -f 'pyproject.toml' ]   && echo '  - pyproject.toml'
+      [ -f 'requirements.txt' ] && echo '  - requirements.txt'
+      [ -f 'requirements.in' ]  && echo '  - requirements.in'
 
       echo \"[INFO] Voer 'uv sync' uit...\"
       '$UV_BIN' sync
     else
-      echo \"[WARN] Geen pyproject.toml, requirements.txt of requirements.in gevonden in $APP_DIR\"
-      echo \"[WARN] 'uv sync' wordt overgeslagen.\"
+      echo '[WARN] Geen pyproject.toml, requirements.txt of requirements.in gevonden in $APP_DIR'
+      echo '[WARN] uv sync wordt overgeslagen.'
     fi
 
     # Log-directory
@@ -354,6 +404,8 @@ $CRON_SCHEDULE cd $APP_DIR && $UV_BIN sync && $UV_BIN run $PYTHON_SCRIPT >> /var
       sed -i '/IP Address:/d' /etc/motd 2>/dev/null || true
       echo \"IP Address: \$IP\" >> /etc/motd
     fi
+
+    echo '[DEBUG] post_install in container afgerond.'
   "
 
   msg_ok "uv, repo en cron zijn in de container geconfigureerd"
