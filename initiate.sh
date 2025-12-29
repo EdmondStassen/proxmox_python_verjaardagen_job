@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Gebaseerd op: https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/debian.sh
 # Draait op de Proxmox host
 
-# Community-scripts core inladen
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+set -e
+
+# Community-scripts core inladen (nieuwe locatie / ProxmoxVED)
+source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
 
 # ================== BASIS-INFO OVER DE APP ==================
 APP="Python uv cron"
@@ -104,7 +105,7 @@ prompt_multiline_secret() {
 echo
 echo "Repository toegang via GitHub:"
 echo
-echo "  [1] GitHub PAT of HTTPS-URL (https://github.com/user/repo.git)"
+echo "  [1] GitHub PAT of HTTPS-URL (https://github.com/user/repo.git / https://PAT@github.com/user/repo.git)"
 echo "  [2] Deploy key (SSH) + SSH clone-URL (git@github.com:user/repo.git)"
 echo
 
@@ -152,7 +153,6 @@ while [[ -z "$GIT_AUTH_METHOD" ]]; do
           echo "Gegenereerde HTTPS-URL op basis van PAT:"
           echo "  $GIT_REPO"
           echo
-
         else
           GIT_REPO="$GIT_INPUT"
           echo
@@ -205,12 +205,24 @@ while [[ -z "$GIT_AUTH_METHOD" ]]; do
   esac
 done
 
-export GIT_AUTH_METHOD GIT_REPO DEPLOY_KEY_B64
+# Repository-naam (user/repo) netjes afleiden voor weergave/description
+REPO_NAME=""
+if [[ "$GIT_REPO" =~ github.com[:/]+([^/]+/[^/.]+)(\.git)?$ ]]; then
+  REPO_NAME="${BASH_REMATCH[1]}"
+fi
+
+if [[ -z "$REPO_NAME" ]]; then
+  # Fallback: expliciet vragen
+  read -rp "Kon de repo-naam niet automatisch afleiden, voer in als 'user/repo': " REPO_NAME
+fi
+
+export GIT_AUTH_METHOD GIT_REPO DEPLOY_KEY_B64 REPO_NAME
 
 # Voor weergave in description: geen geheime info lekken
-REPO_DISPLAY="$GIT_REPO"
-if [[ "$GIT_REPO" =~ ^https://github_pat_.*@github\.com/(.*)$ ]]; then
-  REPO_DISPLAY="https://github_pat_***@github.com/${BASH_REMATCH[1]}"
+if [[ "$GIT_AUTH_METHOD" == "https" ]]; then
+  REPO_DISPLAY="https://github.com/$REPO_NAME"
+else
+  REPO_DISPLAY="git@github.com:$REPO_NAME.git"
 fi
 
 # App specifieke defaults
@@ -261,7 +273,7 @@ post_install_python_uv() {
     # Basis packages
     apt-get update
     apt-get -y upgrade
-    apt-get install -y git curl openssh-client python3 python3-distutils cron
+    apt-get install -y git curl openssh-client python3 python3-venv cron
 
     # uv installeren (indien nog niet aanwezig)
     if [ ! -x '$UV_BIN' ]; then
