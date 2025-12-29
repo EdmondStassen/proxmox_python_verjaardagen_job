@@ -4,7 +4,7 @@
 set -e
 
 # Community-scripts core inladen (nieuwe locatie / ProxmoxVED)
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
+source <(curl -fsSL https://git.community-scripts.org/community-scripts/ProxmoxVED/raw/branch/main/misc/build.func)
 
 # ================== BASIS-INFO OVER DE APP ==================
 APP="Python uv cron"
@@ -39,7 +39,7 @@ while true; do
 done
 
 export HN
-export var_hostname="$HN"  # Belangrijk: Community-scripts gebruiken var_hostname voor de CT-naam
+export var_hostname="$HN"  # Community-scripts gebruiken var_hostname voor de CT-naam
 
 # 1) Proxmox LXC root-wachtwoord genereren + eventueel overschrijven
 echo "Er wordt automatisch een sterk root-wachtwoord voor de LXC gegenereerd."
@@ -77,41 +77,16 @@ done
 # NIET exporteren als var_pw / PW, zodat build.func het niet in pct create propt
 export ROOT_PW
 
-# Helper: multi-line geheim (deploy key) inlezen
-prompt_multiline_secret() {
-  local label="$1"
-  local varname="$2"
-  local line data=""
-  echo
-  echo "----------------------------------------------"
-  echo "Plak nu de ${label}."
-  echo "Beëindig met een regel die alleen bevat: __END_KEY__"
-  echo "----------------------------------------------"
-  echo
-
-  while IFS= read -r line; do
-    if [[ "$line" == "__END_KEY__" ]]; then
-      break
-    fi
-    data+="$line"$'\n'
-  done
-
-  data="${data%$'\n'}"
-  printf -v "$varname" '%s' "$data"
-}
-
-# 2) GitHub via PAT / HTTPS URL of via SSH deploy key
+# 2) GitHub via PAT / HTTPS URL of via SSH deploy key (key in container genereren)
 echo
 echo "Repository toegang via GitHub:"
 echo
 echo "  [1] GitHub PAT of HTTPS-URL (https://github.com/user/repo.git / https://PAT@github.com/user/repo.git)"
-echo "  [2] Deploy key (SSH) + SSH clone-URL (git@github.com:user/repo.git)"
+echo "  [2] Deploy key (SSH) + SSH clone-URL (git@github.com:user/repo.git) - PRIVATE key wordt in de container gegenereerd"
 echo
 
 GIT_AUTH_METHOD=""
 GIT_REPO=""
-DEPLOY_KEY=""
-DEPLOY_KEY_B64=""
 
 while [[ -z "$GIT_AUTH_METHOD" ]]; do
   read -rp "Kies authenticatiemethode [1/2]: " AUTH_CHOICE
@@ -176,7 +151,8 @@ while [[ -z "$GIT_AUTH_METHOD" ]]; do
       GIT_AUTH_METHOD="ssh_deploy_key"
       echo
       echo "Je hebt gekozen voor: Deploy key (SSH)."
-      echo "Zorg dat de *publieke* key als deploy key op GitHub in de repo staat."
+      echo "De PRIVATE key wordt in de container gegenereerd."
+      echo "Je krijgt daar de PUBLIC key te zien, die je als Deploy key op GitHub moet zetten."
       echo
 
       while [[ -z "$GIT_REPO" ]]; do
@@ -185,15 +161,6 @@ while [[ -z "$GIT_AUTH_METHOD" ]]; do
           echo "SSH clone-URL mag niet leeg zijn."
         fi
       done
-
-      prompt_multiline_secret "PRIVATE deploy key (begint met '-----BEGIN ... PRIVATE KEY-----')" DEPLOY_KEY
-
-      if [[ -z "$DEPLOY_KEY" ]]; then
-        echo "Deploy key is leeg; kan niet doorgaan met SSH deploy key."
-        exit 1
-      fi
-
-      DEPLOY_KEY_B64="$(printf '%s' "$DEPLOY_KEY" | base64 -w0)"
       ;;
     *)
       echo "Ongeldige keuze, kies 1 of 2."
@@ -211,7 +178,7 @@ if [[ -z "$REPO_NAME" ]]; then
   read -rp "Kon de repo-naam niet automatisch afleiden, voer in als 'user/repo': " REPO_NAME
 fi
 
-export GIT_AUTH_METHOD GIT_REPO DEPLOY_KEY_B64 REPO_NAME
+export GIT_AUTH_METHOD GIT_REPO REPO_NAME
 
 # Voor weergave in description (geen secrets)
 if [[ "$GIT_AUTH_METHOD" == "https" ]]; then
@@ -273,10 +240,6 @@ post_install_python_uv() {
     apt-get -y upgrade
     apt-get install -y git curl openssh-client python3 python3-venv cron
 
-    # Basis netwerk-check
-    echo '[DEBUG] DNS lookup github.com:'
-    getent hosts github.com || echo '[WARN] github.com kan niet worden geresolved'
-
     # uv installeren (indien nog niet aanwezig)
     if [ ! -x '$UV_BIN' ]; then
       echo '[INFO] uv niet gevonden, installeren...'
@@ -285,18 +248,31 @@ post_install_python_uv() {
       echo '[INFO] uv is al aanwezig.'
     fi
 
-    # Git auth configureren
     GIT_AUTH_METHOD='$GIT_AUTH_METHOD'
     REPO_URL='$GIT_REPO'
-    DEPLOY_KEY_B64='$DEPLOY_KEY_B64'
 
     if [ \"\$GIT_AUTH_METHOD\" = \"ssh_deploy_key\" ]; then
-      echo '[INFO] SSH deploy key configureren voor GitHub (poort 443 via ssh.github.com)...'
+      echo '[INFO] SSH deploy key in container genereren...'
       mkdir -p /root/.ssh
       chmod 700 /root/.ssh
 
-      printf '%s' \"\$DEPLOY_KEY_B64\" | base64 -d > /root/.ssh/id_ed25519
-      chmod 600 /root/.ssh/id_ed25519
+      if [ ! -f /root/.ssh/id_ed25519 ]; then
+        ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519 -C \"proxmox-ct-$CTID\"
+      fi
+
+      echo
+      echo '============================================================'
+      echo ' GITHUB DEPLOY KEY (PUBLIC KEY)'
+      echo
+      echo ' Voeg deze PUBLIC key toe aan je GitHub repo onder:'
+      echo '   Settings → Deploy keys → Add deploy key'
+      echo
+      cat /root/.ssh/id_ed25519.pub
+      echo '============================================================'
+      echo
+      echo 'Wanneer je deze key hebt toegevoegd als Deploy key in GitHub,'
+      echo 'druk dan op Enter om door te gaan met het clonen van de repo...'
+      read -r _
 
       # SSH config: gebruik ssh.github.com:443 voor github.com
       cat >/root/.ssh/config <<'EOF'
@@ -317,10 +293,9 @@ EOF
 
       echo '[INFO] SSH config voor github.com ingesteld (via ssh.github.com:443).'
 
-      echo '[DEBUG] Test SSH verbinding naar GitHub...'
-      # korte test, met timeout, zodat hij niet blijft hangen
+      echo '[DEBUG] Test SSH verbinding naar GitHub (poort 443)...'
       set +e
-      timeout 15 ssh -vvT git@github.com -p 443 </dev/null
+      timeout 15 ssh -T git@github.com -p 443 </dev/null
       SSH_TEST_EXIT=\$?
       set -e
       if [ \"\$SSH_TEST_EXIT\" -ne 0 ]; then
