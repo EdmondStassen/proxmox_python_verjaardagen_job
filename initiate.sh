@@ -23,6 +23,21 @@ echo "   ${APP} - interactieve configuratie"
 echo "=============================================="
 echo
 
+# 0) Containernaam / hostname opvragen
+DEFAULT_HN="${HN:-$(echo "$APP" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')}"
+while true; do
+  read -rp "Naam/hostname voor de nieuwe container [${DEFAULT_HN}]: " INPUT_HN
+  HN="${INPUT_HN:-$DEFAULT_HN}"
+
+  # eenvoudige validatie: letters, cijfers en koppeltekens, begint met letter/cijfer
+  if [[ "$HN" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
+    break
+  else
+    echo "Ongeldige naam. Gebruik alleen letters, cijfers en koppeltekens, en laat niet beginnen met een koppelstreep."
+  fi
+done
+export HN
+
 # 1) Proxmox LXC root-wachtwoord genereren + eventueel overschrijven
 echo "Er wordt automatisch een sterk root-wachtwoord voor de LXC gegenereerd."
 # 20 tekens, letters/cijfers/symbolen
@@ -147,6 +162,7 @@ UV_BIN="${UV_BIN:-/root/.local/bin/uv}"       # uv-binary pad
 
 echo
 echo "Samenvatting invoer:"
+echo "  - Containernaam   : $HN"
 echo "  - Root wachtwoord : $var_pw"
 echo "  - GitHub URL      : $GIT_REPO"
 echo "  - App directory   : $APP_DIR"
@@ -258,6 +274,7 @@ $CRON_SCHEDULE cd $APP_DIR && $UV_BIN sync && $UV_BIN run $PYTHON_SCRIPT >> /var
   if [[ -n "$IP" ]]; then
     pct set "$CTID" -description "Python uv cron container
 
+Hostname: $HN
 IP address: $IP
 
 Root password: $var_pw
@@ -265,7 +282,7 @@ Root password: $var_pw
 Repo: $GIT_REPO
 Script: $PYTHON_SCRIPT
 Cron: $CRON_SCHEDULE"
-    msg_ok "Container description bijgewerkt met IP: $IP"
+    msg_ok "Container description bijgewerkt met hostname en IP: $IP"
   else
     msg_warn "Kon IP niet ophalen voor CT ${CTID} (mogelijk nog geen DHCP lease)."
   fi
@@ -279,6 +296,7 @@ post_install_python_uv   # Onze extra stappen
 
 msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
+echo -e "${INFO}${YW} Containernaam/hostname:${CL} ${GN}$HN${CL}"
 echo -e "${INFO}${YW} De container gebruikt DHCP voor zijn IP-adres.${CL}"
 echo -e "${INFO}${YW} Het IP-adres wordt getoond in:${CL}"
 echo -e "${TAB}${NETWORK}${GN}- Proxmox 'Summary / Algemene informatie' (Description)${CL}"
