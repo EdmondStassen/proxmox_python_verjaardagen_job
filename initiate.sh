@@ -3,7 +3,7 @@
 
 set -e
 
-# Community-scripts core inladen
+# Community-scripts core inladen (nieuwe locatie / ProxmoxVED)
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVED/main/misc/build.func)
 
 # ================== BASIS-INFO OVER DE APP ==================
@@ -37,7 +37,9 @@ while true; do
     echo "Ongeldige naam. Gebruik alleen letters, cijfers en koppeltekens, en laat niet beginnen met een koppelstreep."
   fi
 done
+
 export HN
+export var_hostname="$HN"  # Belangrijk: Community-scripts gebruiken var_hostname voor de CT-naam
 
 # 1) Proxmox LXC root-wachtwoord genereren + eventueel overschrijven
 echo "Er wordt automatisch een sterk root-wachtwoord voor de LXC gegenereerd."
@@ -71,6 +73,8 @@ while true; do
     fi
   fi
 done
+
+# NIET exporteren als var_pw / PW, zodat build.func het niet in pct create propt
 export ROOT_PW
 
 # Helper: multi-line geheim (deploy key) inlezen
@@ -131,6 +135,7 @@ while [[ -z "$GIT_AUTH_METHOD" ]]; do
 
         if [[ "$GIT_INPUT" == github_pat_* ]]; then
           GITHUB_PAT="$GIT_INPUT"
+
           REPO_SLUG=""
           while [[ -z "$REPO_SLUG" ]]; do
             read -rp "Voer de repository-naam in als 'user/repo' (bijv. mijnuser/mijnrepo): " REPO_SLUG
@@ -295,7 +300,8 @@ EOF
 
       touch /root/.ssh/known_hosts
       if ! grep -q \"github.com\" /root/.ssh/known_hosts 2>/dev/null; then
-        ssh-keyscan -H github.com >> /root/.ssh/known_hosts 2>/dev/null || true
+        # host key binnenhalen op poort 443, maar entry hernoemen naar 'github.com'
+        ssh-keyscan -p 443 ssh.github.com 2>/dev/null | sed 's/ssh.github.com/github.com/' >> /root/.ssh/known_hosts || true
       fi
 
       echo \"[INFO] SSH config voor github.com ingesteld (via ssh.github.com:443).\"
@@ -378,6 +384,7 @@ Cron: $CRON_SCHEDULE"
     msg_warn "Kon IP niet ophalen voor CT ${CTID} (mogelijk nog geen DHCP lease)."
   fi
 
+  # Root-wachtwoord binnen de container zetten
   if [[ -n "$ROOT_PW" ]]; then
     echo "root:${ROOT_PW}" | pct exec "$CTID" -- chpasswd
     msg_ok "Root-wachtwoord ingesteld binnen de container."
@@ -388,16 +395,16 @@ Cron: $CRON_SCHEDULE"
 
 # ================== CONTAINER MAKEN EN CONFIGUREREN ==================
 start
-build_container
-description
-post_install_python_uv
+build_container          # Maakt de Debian 13 LXC met DHCP (via build.func logica)
+description              # Standaard description
+post_install_python_uv   # Onze extra stappen
 
-msg_ok "Completed Successfully!\n"
-echo -e \"${CREATING}${GN}${APP} setup has been successfully initialized!${CL}\"
-echo -e \"${INFO}${YW} Containernaam/hostname:${CL} ${GN}$HN${CL}\"
-echo -e \"${INFO}${YW} De container gebruikt DHCP voor zijn IP-adres.${CL}\"
-echo -e \"${INFO}${YW} Het IP-adres wordt getoond in:${CL}\"
-echo -e \"${TAB}${NETWORK}${GN}- Proxmox 'Summary / Algemene informatie' (Description)${CL}\"
-echo -e \"${TAB}${NETWORK}${GN}- /etc/motd binnen de container${CL}\"
+msg_ok "Completed Successfully!"
+echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
+echo -e "${INFO}${YW} Containernaam/hostname:${CL} ${GN}$HN${CL}"
+echo -e "${INFO}${YW} De container gebruikt DHCP voor zijn IP-adres.${CL}"
+echo -e "${INFO}${YW} Het IP-adres wordt getoond in:${CL}"
+echo -e "${TAB}${NETWORK}${GN}- Proxmox 'Summary / Algemene informatie' (Description)${CL}"
+echo -e "${TAB}${NETWORK}${GN}- /etc/motd binnen de container${CL}"
 echo
-echo -e \"${INFO}${YW} Root-wachtwoord van de container:${CL} ${GN}$ROOT_PW${CL}\"
+echo -e "${INFO}${YW} Root-wachtwoord van de container:${CL} ${GN}$ROOT_PW${CL}"
